@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="cs"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Slovíčka">
+<meta name="theme-color" content="#2b6cb0">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="icon" href="icon.svg">
+<title>Slovíčka</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<main id="view"></main>
+<nav id="tabs">
+  <button data-go="#/articles">📄 Články</button>
+  <button data-go="#/words">📚 Slovíčka</button>
+  <button data-go="#/practice">🧠 Procvičit <span id="dueBadge"></span></button>
+  <button data-go="#/listen">🎧 Poslech</button>
+</nav>
+<script type="module" src="app.js"></script>
+</body></html>
