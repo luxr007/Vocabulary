@@ -46,6 +46,7 @@ function speak(text, lang = 'en-US', rate = 0.9) {
     u.onend = u.onerror = () => res(); speechSynthesis.speak(u);
   });
 }
+const splitSent = (t) => t.replace(/([.!?])\s+/g, '$1\u0001').split('\u0001');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- data z repozitáře (data/data.json), pokrok zůstává v telefonu ----------
@@ -112,13 +113,13 @@ async function pArticle(id) {
   $('#read').onclick = async () => {
     if (reading) { speechSynthesis.cancel(); reading = false; $('#read').textContent = '🔊 Číst'; return; }
     reading = true; $('#read').textContent = '⏹ Stop';
-    for (const p of a.text.split(/(?<=[.!?])\s+/)) { if (!reading) break; await speak(p, 'en-US', 0.95); }
+    for (const p of splitSent(a.text)) { if (!reading) break; await speak(p, 'en-US', 0.95); }
     reading = false; $('#read').textContent = '🔊 Číst';
   };
   view.querySelector('.reader').onclick = async (e) => {
     const s = e.target.closest('.w'); if (!s) return; const word = s.dataset.w; if (!word) return;
     const ex = [...set.values()].find((w) => w.phrase.toLowerCase() === word.toLowerCase());
-    const sentence = (a.text.split(/(?<=[.!?])\s+/).find((x) => x.includes(word)) || word).replace(/\s+/g, ' ');
+    const sentence = (splitSent(a.text).find((x) => x.includes(word)) || word).replace(/\s+/g, ' ');
     const pop = $('#pop'); pop.innerHTML = `<div class="pop"><b>${esc(word)}</b> <span id="tr" class="muted">${ex ? esc(ex.cs) : 'překládám…'}</span><div class="row" style="margin-top:8px"><button class="btn sm sec" id="sp">🔊</button>${ex ? '<span class="muted">už je ve slovíčkách</span>' : '<button class="btn sm grn" id="addw">＋ Přidat</button>'}<span class="sp"></span><button class="btn sm sec" id="x">✕</button></div></div>`;
     $('#x').onclick = () => (pop.innerHTML = ''); $('#sp').onclick = () => speak(word);
     let cs = ex ? ex.cs : await translate(word); if (!ex) $('#tr').textContent = cs.toLowerCase();
