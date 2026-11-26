@@ -1,4 +1,3 @@
-import { extractPdf } from './extract.js';
 const $ = (s, r = document) => r.querySelector(s);
 const view = $('#view');
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -6,7 +5,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 // ---------- IndexedDB ----------
 const dbp = new Promise((res, rej) => {
   const r = indexedDB.open('slovicka', 1);
-  r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('articles', { keyPath: 'id', autoIncrement: true }); d.createObjectStore('words', { keyPath: 'id', autoIncrement: true }); };
+  r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('articles', { keyPath: 'id' }); d.createObjectStore('words', { keyPath: 'id' }); };
   r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
 });
 const tx = async (store, mode, fn) => { const d = await dbp; return new Promise((res, rej) => { const t = d.transaction(store, mode); const q = fn(t.objectStore(store)); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
@@ -49,8 +48,30 @@ function speak(text, lang = 'en-US', rate = 0.9) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---------- data z repozitáře (data/data.json), pokrok zůstává v telefonu ----------
+async function syncData(force) {
+  try {
+    const r = await fetch('data/data.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) throw 0;
+    const data = await r.json();
+    const old = new Map((await all('words')).map((w) => [w.id, w]));
+    const keep = new Set(); let added = 0;
+    for (const a of data.articles) {
+      await put('articles', { id: a.id, title: a.title, text: a.text, added: a.added ? Date.parse(a.added) : 0 });
+      for (const w of a.words) {
+        const id = a.id + ':' + w.phrase.toLowerCase(); keep.add(id);
+        const o = old.get(id); if (!o) added++;
+        await put('words', { due: 0, ...(o || {}), id, articleId: a.id, phrase: w.phrase, sentence: w.sentence, cs: w.cs, kind: w.kind || 'data', added: o?.added || Date.now() });
+      }
+    }
+    const aids = new Set(data.articles.map((a) => a.id));
+    for (const a of await all('articles')) if (!aids.has(a.id)) await del('articles', a.id);
+    for (const [id, w] of old) if (w.kind !== 'manual' && !keep.has(id)) await del('words', id);
+    return added ? `Přidáno ${added} nových slov` : 'Nic nového';
+  } catch { return force ? 'Data se nepodařilo načíst (offline?)' : ''; }
+}
+
 // ---------- router ----------
-const routes = { articles: pArticles, words: pWords, practice: pPractice, listen: pListen, article: pArticle, add: pAdd };
+const routes = { articles: pArticles, words: pWords, practice: pPractice, listen: pListen, article: pArticle };
 async function route() {
   stopListen();
   const [, name = 'articles', arg] = location.hash.split('/');
@@ -66,53 +87,15 @@ document.querySelectorAll('nav button').forEach((b) => (b.onclick = () => (locat
 async function pArticles() {
   const arts = (await all('articles')).reverse(); const words = await all('words');
   view.innerHTML = `<h1>Články</h1>
-  <label class="btn" style="display:block;text-align:center">＋ Nahrát PDF<input id="file" type="file" accept="application/pdf" hidden></label>
-  <p class="muted">Zvýrazněná slova (zvýrazňovač, anotace nebo tučné písmo) se vyberou automaticky.</p>
-  <div id="status"></div>
+  <p class="muted">Nové články přidává Claude: pošli mu PDF a on aktualizuje data.</p>
+  <button class="btn sec sm" id="sync">↻ Načíst nová data</button><div id="status"></div>
   ${arts.map((a) => `<div class="card" data-id="${a.id}"><b>${esc(a.title)}</b><div class="muted">${words.filter((w) => w.articleId === a.id).length} slov · ${new Date(a.added).toLocaleDateString('cs')}</div></div>`).join('') || '<p class="muted">Zatím žádné články.</p>'}`;
   view.querySelectorAll('.card').forEach((c) => (c.onclick = () => (location.hash = '#/article/' + c.dataset.id)));
-  $('#file').onchange = async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    $('#status').innerHTML = '<div class="card">Čtu PDF…</div>';
-    try {
-      const pdfjs = await import('./lib/pdf.min.mjs');
-      pdfjs.GlobalWorkerOptions.workerSrc = new URL('./lib/pdf.worker.min.mjs', import.meta.url).href;
-      const doc = await pdfjs.getDocument({ data: new Uint8Array(await f.arrayBuffer()) }).promise;
-      const r = await extractPdf(pdfjs, doc);
-      window._draft = { title: f.name.replace(/\.pdf$/i, ''), ...r };
-      location.hash = '#/add';
-    } catch (err) { $('#status').innerHTML = `<div class="card">Chyba: ${esc(err.message)}</div>`; }
-  };
-}
-
-async function pAdd() {
-  const d = window._draft; if (!d) return (location.hash = '#/articles');
-  const st = d.stats;
-  view.innerHTML = `<h1>Nalezená slova</h1>
-  <input type="text" id="title" value="${esc(d.title)}">
-  <p class="muted">Nalezeno ${d.marks.length} slov. ${st.hlCount ? 'Zvýraznění: ' + st.hlCount + ' slov. ' : ''}${st.useBold ? '' : 'Tučné písmo ignorováno (je ho příliš mnoho). '}Odškrtni chybné nálezy.</p>
-  ${d.marks.length ? '' : '<div class="card">Nic označeného jsem nenašel. Pokud je PDF sken/fotka, zvýraznění z obrázku zatím neumím. Slova můžeš přidat ručně v čtečce klepnutím na slovo.</div>'}
-  <div id="list">${d.marks.map((m, i) => `<div class="mk"><input type="checkbox" checked data-i="${i}"><div><b>${esc(m.phrase)}</b> <span class="muted">${m.kind === 'bold' ? 'tučně' : 'zvýrazněno'}</span><div class="muted">${esc(m.sentence)}</div></div></div>`).join('')}</div>
-  <div class="row" style="margin-top:14px"><button class="btn" id="save">Uložit a přeložit</button><button class="btn sec" id="cancel">Zrušit</button></div><div id="st" class="muted"></div>`;
-  $('#cancel').onclick = () => { window._draft = null; location.hash = '#/articles'; };
-  $('#save').onclick = async () => {
-    $('#save').disabled = true;
-    const chosen = [...view.querySelectorAll('.mk input:checked')].map((c) => d.marks[+c.dataset.i]);
-    const aid = await tx('articles', 'readwrite', (o) => o.add({ title: $('#title').value || d.title, text: d.text, added: Date.now() }));
-    let n = 0;
-    for (const m of chosen) {
-      $('#st').textContent = `Překládám ${++n}/${chosen.length}…`;
-      await tx('words', 'readwrite', async (o) => o.add({ phrase: m.phrase, sentence: m.sentence, articleId: aid, kind: m.kind, cs: '', due: 0, added: Date.now() }));
-    }
-    // překlad po uložení, aby se nic neztratilo při výpadku sítě
-    const ws = (await all('words')).filter((w) => w.articleId === aid);
-    for (let i = 0; i < ws.length; i++) { $('#st').textContent = `Překládám ${i + 1}/${ws.length}…`; ws[i].cs = (await translate(ws[i].phrase)).toLowerCase(); await put('words', ws[i]); }
-    window._draft = null; location.hash = '#/article/' + aid;
-  };
+  $('#sync').onclick = async () => { $('#sync').textContent = 'Načítám…'; const n = await syncData(true); $('#status').textContent = n; setTimeout(route, 800); };
 }
 
 async function pArticle(id) {
-  id = +id; const a = await get('articles', id); if (!a) return (location.hash = '#/articles');
+  const a = await get('articles', id); if (!a) return (location.hash = '#/articles');
   const words = (await all('words')).filter((w) => w.articleId === id);
   const set = new Map(words.map((w) => [w.phrase.toLowerCase(), w]));
   // zvýraznit známé fráze v textu
@@ -123,9 +106,8 @@ async function pArticle(id) {
     const hit = [...set.keys()].some((k) => k === bare.toLowerCase() || k.split(' ').includes(bare.toLowerCase()));
     return `<span class="w${hit ? ' m' : ''}" data-w="${esc(bare)}">${hit ? '<mark>' + esc(t) + '</mark>' : esc(t)}</span>`;
   }).join('');
-  view.innerHTML = `<div class="row"><button class="btn sec sm" onclick="location.hash='#/articles'">‹ Zpět</button><span class="sp"></span><button class="btn sec sm" id="read">🔊 Číst</button><button class="btn red sm" id="del">Smazat</button></div>
+  view.innerHTML = `<div class="row"><button class="btn sec sm" onclick="location.hash='#/articles'">‹ Zpět</button><span class="sp"></span><button class="btn sec sm" id="read">🔊 Číst</button></div>
   <h1>${esc(a.title)}</h1><p class="muted">Klepni na slovo pro překlad a přidání do slovíček.</p><div class="reader">${html}</div><div id="pop"></div>`;
-  $('#del').onclick = async () => { if (!confirm('Smazat článek i jeho slovíčka?')) return; for (const w of words) await del('words', w.id); await del('articles', id); location.hash = '#/articles'; };
   let reading = false;
   $('#read').onclick = async () => {
     if (reading) { speechSynthesis.cancel(); reading = false; $('#read').textContent = '🔊 Číst'; return; }
@@ -140,7 +122,7 @@ async function pArticle(id) {
     const pop = $('#pop'); pop.innerHTML = `<div class="pop"><b>${esc(word)}</b> <span id="tr" class="muted">${ex ? esc(ex.cs) : 'překládám…'}</span><div class="row" style="margin-top:8px"><button class="btn sm sec" id="sp">🔊</button>${ex ? '<span class="muted">už je ve slovíčkách</span>' : '<button class="btn sm grn" id="addw">＋ Přidat</button>'}<span class="sp"></span><button class="btn sm sec" id="x">✕</button></div></div>`;
     $('#x').onclick = () => (pop.innerHTML = ''); $('#sp').onclick = () => speak(word);
     let cs = ex ? ex.cs : await translate(word); if (!ex) $('#tr').textContent = cs.toLowerCase();
-    if ($('#addw')) $('#addw').onclick = async () => { await tx('words', 'readwrite', (o) => o.add({ phrase: word, sentence, articleId: id, kind: 'manual', cs: cs.toLowerCase(), due: 0, added: Date.now() })); pop.innerHTML = ''; pArticle(id); };
+    if ($('#addw')) $('#addw').onclick = async () => { await tx('words', 'readwrite', (o) => o.put({ id: 'm' + Date.now(), phrase: word, sentence, articleId: id, kind: 'manual', cs: cs.toLowerCase(), due: 0, added: Date.now() })); pop.innerHTML = ''; pArticle(id); };
   };
 }
 
@@ -149,7 +131,7 @@ async function pWords() {
   const ws = (await all('words')).sort((a, b) => b.added - a.added);
   view.innerHTML = `<h1>Slovíčka (${ws.length})</h1>${ws.map((w) => `<div class="card" data-id="${w.id}"><div class="row"><b>${esc(w.phrase)}</b><span class="sp"></span><span class="muted">${isDue(w) ? 'k procvičení' : 'za ' + Math.max(1, Math.round((w.due - Date.now()) / DAY)) + ' d'}</span></div><div>${esc(w.cs) || '<span class="muted">bez překladu</span>'}</div><div class="muted">${esc(w.sentence)}</div></div>`).join('') || '<p class="muted">Zatím nic.</p>'}`;
   view.querySelectorAll('.card').forEach((c) => (c.onclick = async () => {
-    const w = await get('words', +c.dataset.id);
+    const w = await get('words', c.dataset.id);
     const n = prompt(`Český překlad pro „${w.phrase}“ (prázdné = smazat slovo):`, w.cs);
     if (n === null) return; if (n === '') await del('words', w.id); else { w.cs = n; await put('words', w); } pWords();
   }));
@@ -204,4 +186,5 @@ async function pListen() {
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 speechSynthesis.getVoices();
+syncData().then(route);
 route();
